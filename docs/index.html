@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Which content page should you review first? A validated, honest-split scoring model</title>
+<meta name="description" content="A content-decline scoring model built on FlyRank's SEO internship dataset, validated with a client-grouped split and an honest before/after comparison against a naive random split.">
+<link rel="stylesheet" href="assets/paper.css">
+</head>
+<body>
+
+<div class="wrap">
+
+  <header class="hero">
+    <p class="kicker">Research note &middot; content prioritization &middot; September 2026</p>
+    <h1>Which content page should a reviewer look at first this week?</h1>
+    <div class="decay-bar" aria-hidden="true"></div>
+
+    <div class="abstract">
+      <span class="label">Abstract</span>
+      <p>A content team publishes far more pages than it can ever manually revisit, and some of
+      those pages quietly lose visibility while still sitting on a good position &mdash; a page
+      ranking on page one that a reviewer would never think to check without a nudge. This paper
+      builds and honestly validates a scoring model that provides that nudge, using FlyRank's
+      anonymized ML-internship starter dataset: 30,000 pseudonymized content pages across 32
+      clients, with trailing-90-day search performance metrics. A transparent CTR-vs-position rule
+      baseline is compared against Logistic Regression and Random Forest under a
+      <em>client-grouped</em> train/test split, so the evaluation never lets a model see a
+      client's other pages before being tested on that same client. Under that honest split,
+      Logistic Regression lifts precision@50 from 0.50 (the baseline) to 0.72 &mdash; a real,
+      moderate improvement &mdash; while a naive random split on the identical model would have
+      reported 0.92, quietly rewarding memorization instead of skill. The output is a ranked,
+      human-reviewed action queue with reason codes and an explicit no-go list, built to support a
+      content reviewer's judgment on exactly this kind of quietly-underperforming page, not
+      replace it.</p>
+    </div>
+
+    <p class="byline">Capstone project, FlyRank ML Internship &middot;
+      <a href="https://github.com/abc085455-byte/flyrank-ml-internship">source repository</a></p>
+  </header>
+
+  <section id="introduction">
+    <div class="section-head"><span class="section-num">01</span><h2>Introduction</h2></div>
+    <p class="lede">A content or SEO team publishes far more pages than it can ever manually
+    review again. The question this project answers is narrow on purpose: out of thousands of
+    already-live pages, which ones are worth a reviewer's limited time <em>this week</em>, and
+    why?</p>
+
+    <p>This is not a hypothetical problem. It's the exact scenario FlyRank's own product exists to
+    catch: a page that looks fine on the surface &mdash; decent position, real search demand
+    &mdash; but is quietly failing to convert that visibility into clicks. A reviewer scanning a
+    dashboard by traffic volume or by publish date would likely never flag it, because nothing
+    about it looks broken at a glance. Here is one real, anonymized page from this project's
+    held-out test set that illustrates exactly that failure mode:</p>
+
+    <div class="case-study">
+      <span class="case-label">Case study &mdash; one page from the held-out test set</span>
+      <p>A keyword-article page sits at an average position of 7.6 &mdash; solidly on page one
+      &mdash; and drew 140,079 impressions in the trailing 90 days. By any traffic-volume ranking,
+      this page looks healthy: high visibility, no obvious red flag. But its click-through rate is
+      0.01%, far below what a page-one result should convert, and it was updated only 20 days ago
+      &mdash; so "hasn't been touched in a while" isn't the story either. The model scores this
+      page at 0.91 probability of being in decline, and the playbook's reason codes point squarely
+      at a CTR/title problem, not a staleness one.</p>
+      <dl>
+        <dt>impressions_90d</dt><dd>140,079</dd>
+        <dt>avg_position</dt><dd>7.6</dd>
+        <dt>ctr</dt><dd>0.01%</dd>
+        <dt>days_since_last_update</dt><dd>20</dd>
+        <dt>content_type</dt><dd>keyword article</dd>
+        <dt>model_probability</dt><dd>0.91</dd>
+        <dt>reason_codes</dt><dd><code>low_ctr_visible_page</code>, <code>model_high_risk</code></dd>
+        <dt>suggested_action</dt><dd><code>refresh_and_review_ctr</code></dd>
+      </dl>
+    </div>
+
+    <p>A reviewer (or their team lead) uses the model's output as a ranked queue built for exactly
+    this kind of page: pick the top N, read the reason code attached to each, and decide on an
+    action &mdash; refresh the copy, fix a title, or leave it and keep monitoring. Getting this
+    wrong has an asymmetric cost. Flagging a page that didn't need attention wastes an hour or two
+    of review time. Missing a real, already-declining page &mdash; like the one above, sitting in
+    plain sight on page one &mdash; lets it keep losing visibility for weeks before anyone notices,
+    a compounding, more expensive mistake. The scoring approach below is built with that asymmetry
+    in mind: it aims to put real decliners near the top of the queue, not just to maximize overall
+    accuracy.</p>
+  </section>
+
+  <section id="data">
+    <div class="section-head"><span class="section-num">02</span><h2>Data</h2></div>
+    <p>This project uses the starter dataset shipped with the FlyRank ML internship:
+    <code>content_refresh_anonymized.csv</code> &mdash; 30,000 pseudonymized content items across
+    44 columns and 32 pseudonymized clients, each row a trailing-90-day snapshot of one content
+    page's search performance (impressions, clicks, CTR, position, engagement, freshness, and
+    keyword-difficulty fields). It is a single snapshot, not a repeated time series per page, so a
+    genuine time-based train/test split isn't available in this slice.</p>
+    <p>FlyRank also publishes a larger, ~79-million-row warehouse release with daily granularity,
+    which would support a true future-window label (train on one period, predict the next) instead
+    of the current-window proxy used here. That release was scoped out of this capstone for time
+    reasons and is named directly in the Limitations below, rather than left unmentioned.</p>
+    <h3>Excluded, and why</h3>
+    <ul>
+      <li><code>trend_direction</code> and <code>trend_pct</code> &mdash; these define the label
+      itself. Using them as model inputs would be circular.</li>
+      <li><code>content_id</code> and <code>client_id</code> &mdash; pseudonyms, used only to
+      group the train/test split, never as features.</li>
+      <li>No FlyRank product flags (<code>health_score</code>, <code>priority_score</code>,
+      <code>is_quick_win</code>, etc.) exist in this starter file at all &mdash; confirmed
+      directly by scanning every column name.</li>
+    </ul>
+    <p>Every field in this release is already pseudonymized by FlyRank before publication: no
+    client names, raw query text, or URLs appear anywhere in this dataset, this paper, or its
+    source notebooks &mdash; including the case study above, which uses only anonymized metrics,
+    no page identifiers.</p>
+  </section>
+
+  <section id="methodology">
+    <div class="section-head"><span class="section-num">03</span><h2>Methodology</h2></div>
+
+    <h3>Label</h3>
+    <p><code>is_declining_label = (trend_direction == "down")</code> &mdash; a
+    <strong>current-window proxy</strong>, not a future outcome. <code>trend_direction</code>
+    itself summarizes the last 30 days of impressions against the 30 days before that. The model
+    below answers "is this page <em>currently</em> trending down," not "will it decline
+    <em>next</em>" &mdash; a real limit, named here and revisited in Limitations.</p>
+
+    <h3>Features</h3>
+    <p>18 numeric fields (log-transformed volume metrics, CTR, position, engagement, content age
+    and freshness, word count, keyword difficulty) plus 8 one-hot encoded categorical fields
+    &mdash; 53 columns after encoding. Two missingness flags
+    (<code>has_search_volume</code>, <code>has_word_count</code>) were added rather than silently
+    filling with zero, since missingness in this dataset follows content type and a blind fill
+    would inject a fake category signal.</p>
+
+    <h3>Baseline</h3>
+    <p>A transparent rule, not a fitted model: flag a page as worth a CTR/title review when it's
+    visible (<code>impressions_90d &ge; 500</code>, real position data) <strong>and</strong> its
+    click-through rate sits below the median CTR of other visible pages in its own position tier;
+    rank flagged pages by impression volume. This rule follows directly from an earlier signal
+    check on this same data, which confirmed CTR tracks position tier closely, but found that raw
+    page staleness alone does <em>not</em> reliably predict decline &mdash; the stalest bucket in
+    that check showed a slightly <em>lower</em> decline rate than average, so staleness was
+    deliberately left out of the rule rather than folded in anyway.</p>
+
+    <h3>Models</h3>
+    <p>Logistic Regression, then Random Forest &mdash; starting with the simplest, most
+    interpretable option and only reaching for a less transparent model once the simple one has
+    been given a fair chance.</p>
+
+    <h3>Validation design &mdash; the honest split</h3>
+    <p>Train/test split is grouped by <code>client_id</code> (80/20, one fixed random seed for the
+    headline numbers), <strong>not</strong> a random row split. <code>client_id</code> groups
+    pages that share a brand, CMS, and editorial team; a random row split lets a model see 90% of
+    a client's pages during training and then "solve" its own test set by recognizing that
+    client's quirks, not by learning anything that generalizes. Concretely: a naive random split
+    leaves 31 of the portfolio's 32 clients present on <em>both</em> sides of train/test. The
+    client-grouped split used everywhere below leaves <strong>zero</strong> client overlap (25
+    training clients, 7 entirely held-out test clients).</p>
+
+    <h3>Leakage checks</h3>
+    <p>Two confession tests confirm the check itself works: injecting <code>trend_pct</code> (the
+    label's own numerator) as a feature lifts Logistic Regression's ROC AUC from 0.615 to 0.999,
+    and injecting a literal copy of the label hits 1.000 &mdash; both near the ceiling a true leak
+    should produce, and neither column is anywhere in the real feature set. The model's actual top
+    feature, a page's count of "quiet" days in the last 90, was tested the same way: removing it
+    barely moves Logistic Regression's score at all, confirming it's a real, replaceable signal,
+    not a disguised copy of the answer. A column-name scan found no FlyRank product-flag features
+    to accidentally reuse.</p>
+  </section>
+
+  <section id="results">
+    <div class="section-head"><span class="section-num">04</span><h2>Results</h2></div>
+    <p>All three approaches &mdash; baseline rule, Logistic Regression, Random Forest &mdash; are
+    scored on the identical client-grouped test split: 7 held-out clients the models never trained
+    on, a test-set base rate of 0.511. The baseline's own CTR-tier thresholds are fit on training
+    clients only, then applied to the held-out clients &mdash; the same discipline required of the
+    fitted models. The headline metric is <strong>precision@50</strong>: of the top 50 pages a
+    method puts at the front of the queue, how many are really declining. This metric was chosen
+    because the real action is "a person reviews a short, capacity-limited list," not "rank all
+    30,000 pages perfectly."</p>
+
+    <table>
+      <thead>
+        <tr><th>Method</th><th class="num">ROC AUC</th><th class="num">Precision@50</th><th class="num">Precision</th><th class="num">Recall</th><th class="num">F1</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Baseline rule</td><td class="num">0.538</td><td class="num">0.50</td><td class="num">0.600</td><td class="num">0.271</td><td class="num">0.373</td></tr>
+        <tr class="highlight"><td>Logistic Regression</td><td class="num">0.615</td><td class="num">0.72</td><td class="num">0.588</td><td class="num">0.622</td><td class="num">0.605</td></tr>
+        <tr><td>Random Forest</td><td class="num">0.607</td><td class="num">0.64</td><td class="num">0.588</td><td class="num">0.598</td><td class="num">0.593</td></tr>
+      </tbody>
+    </table>
+
+    <figure>
+      <img src="assets/capstone_model_vs_baseline.svg" alt="Bar chart comparing precision at 50 across the baseline rule, Logistic Regression, and Random Forest, all scored on the same 7 held-out clients." loading="lazy">
+      <figcaption>Same 7 held-out clients, same metric. Logistic Regression is the model this
+      paper's recommendations use.</figcaption>
+    </figure>
+
+    <div class="callout">
+      <strong>A claim caught and corrected while building this paper.</strong> An earlier draft
+      would have called this a 3&times; improvement, following a 0.24-baseline figure that had
+      been repeated across earlier project notebooks. That figure came from a different pipeline's
+      naive random split and was never re-checked against the honest, client-grouped split used
+      here. Recomputed fairly &mdash; baseline thresholds fit on training clients only, evaluated
+      on the same held-out clients as the models &mdash; the honest baseline is precision@50 =
+      0.50, and Logistic Regression's real improvement is a moderate <strong>~1.4&times;</strong>,
+      not 3&times;. The corrected number is reported everywhere in this paper.
+    </div>
+
+    <h3>The split itself is part of the finding</h3>
+    <p>The same Logistic Regression model, on the same features, evaluated under a naive random
+    split instead of the honest client-grouped one, reports precision@50 of 0.92 &mdash; not
+    because the model is better, but because a random split leaves most clients' pages on both
+    sides of train and test, letting the model partly recognize what it already saw.</p>
+
+    <figure>
+      <img src="assets/capstone_split_before_after.svg" alt="Bar chart showing the same Logistic Regression model scoring 0.92 precision at 50 under a naive random split versus 0.72 under an honest client-grouped split." loading="lazy">
+      <figcaption>Same model, same features, same label &mdash; only the split changed. The
+      honest number is the lower one.</figcaption>
+    </figure>
+
+    <p>Across five different client-grouped reseeds of this same 32-client dataset, Logistic
+    Regression's precision@50 ranged from <strong>0.52 to 0.72</strong> (mean 0.64). Read 0.72 as
+    one honest draw from a real range, not a fixed constant this exact model will always hit on a
+    new client roster.</p>
+  </section>
+
+  <section id="limitations">
+    <div class="section-head"><span class="section-num">05</span><h2>Limitations &amp; honest framing</h2></div>
+    <ul>
+      <li><strong>Current-window label, not a forecast.</strong> The label captures the last 30
+      days against the prior 30, not chronic multi-quarter decline. A page that has been flat-bad
+      for months (not newly getting worse) can read as a false alarm here even though a reviewer
+      may still want to see it.</li>
+      <li><strong>No causal claim.</strong> Nothing in this analysis is an experiment. Any
+      observed association between refreshing a page and it doing better afterward reflects, at
+      least in part, that teams choose which pages to refresh &mdash; not a randomized
+      intervention.</li>
+      <li><strong>A small, fixed client pool.</strong> Only 32 clients exist in this dataset, so
+      client-grouped validation has just 7 held-out clients per split. Precision@50 ranged 0.52
+      to 0.72 across five reasonable splits of the identical data. Treat a genuinely new client's
+      queue as low-confidence until re-validated on that client's own realized outcomes.</li>
+      <li><strong>Scope.</strong> Trained and validated on this 30,000-row, 32-client anonymized
+      sample only &mdash; not shown to generalize to clients, industries, or content types outside
+      it. The larger warehouse release was not used in this capstone.</li>
+      <li><strong>A single snapshot, not a live feed.</strong> This is one trailing-90-day cut,
+      not a continuously updated pipeline; scores go stale as new performance data arrives (see
+      the monitoring triggers below).</li>
+      <li><strong>The model sees numbers only.</strong> No title, body text, brand voice, or image
+      enters the feature set. The case-study page above illustrates this directly: the model flags
+      it correctly on the numbers, but only a human reading the actual title and snippet can tell
+      whether the fix is a rewritten title, a better meta description, or something the numbers
+      can't see at all.</li>
+    </ul>
+  </section>
+
+  <section id="recommendations">
+    <div class="section-head"><span class="section-num">06</span><h2>Ranked recommendations</h2></div>
+    <p>The playbook below reuses the same honest, client-grouped Logistic Regression from
+    Section 4, scored on the 7 held-out clients as a stand-in for "a brand-new client's queue,"
+    with transparent, threshold-based reason codes layered on top of the model's probability
+    &mdash; never the probability alone.</p>
+
+    <table>
+      <thead>
+        <tr><th>Archetype (reason code)</th><th>Action</th><th>Why a reviewer trusts it</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>sparse_data</code></td><td>collect_more_data</td><td>Fewer than 20 impressions/90d means almost every feature is near-zero &mdash; not enough signal either way.</td></tr>
+        <tr><td><code>thin_visible_page</code></td><td>expand_and_refresh</td><td>Real traffic, under 1,200 words &mdash; the gap looks like depth, not staleness.</td></tr>
+        <tr><td><code>low_ctr_visible_page</code></td><td>refresh_and_review_ctr</td><td>Good position, weak clicks &mdash; likely a title or snippet problem (the case study above).</td></tr>
+        <tr><td><code>low_engagement</code> + <code>declining</code></td><td>refresh_and_review_engagement</td><td>Traffic arrives but doesn't stick, and the trend is down.</td></tr>
+        <tr><td><code>stale</code> / <code>declining</code> / <code>decay_risk</code></td><td>refresh</td><td>Visible, aging or trending down, no single sharper cause.</td></tr>
+        <tr><td>none of the above</td><td>monitor</td><td>Nothing urgent flagged; check back next cycle.</td></tr>
+      </tbody>
+    </table>
+
+    <figure>
+      <img src="assets/w07_action_mix.svg" alt="Horizontal bar chart of how many pages in the held-out queue received each suggested action." loading="lazy">
+      <figcaption>Action mix on the held-out queue: 6,163 pages across 7 clients the model never trained on.</figcaption>
+    </figure>
+
+    <figure>
+      <img src="assets/w07_confidence_mix.svg" alt="Bar chart showing the count of high, medium, and low confidence pages in the queue." loading="lazy">
+      <figcaption>Most of the queue reads as low or medium confidence &mdash; a deliberate,
+      honest default given the split-variance range above.</figcaption>
+    </figure>
+
+    <h3>Human review, before acting on any flagged page</h3>
+    <ol>
+      <li>Read the actual page. The model never sees title, body, or brand voice.</li>
+      <li>Check <code>confidence</code> alongside the reason code, not the score alone.</li>
+      <li>Check for context the model can't see: seasonality, a recent redesign, an intentional
+      sunset.</li>
+      <li>For a genuinely new client, treat every row as low confidence until validated against
+      that client's own realized outcomes.</li>
+    </ol>
+
+    <div class="nogo">
+      <h3>Must not be automated on this model's say-so alone</h3>
+      <ul>
+        <li>No auto-publishing or auto-editing of any page based on the model's score.</li>
+        <li>No auto-depublishing, unpublishing, or no-indexing decisions.</li>
+        <li>No automatic client-facing claims ("your content is declining") &mdash; reason codes
+        are internal triage language, not client-ready statements.</li>
+        <li>No budget or headcount decisions driven directly by queue volume.</li>
+        <li>Never treat <code>sparse_data</code> rows as "safe" &mdash; they are unscored, not
+        reassuring.</li>
+      </ul>
+    </div>
+
+    <h3>Monitoring &amp; retrain triggers</h3>
+    <p>Recompute the queue every reporting cycle regardless &mdash; a 90-day-window model scored
+    against month-old data is already looking at a different reality than the one it was fit on.
+    Retrain, at minimum, on any of: the realized hit rate on acted-on pages falling well below the
+    observed 0.52&ndash;0.72 range; the portfolio's overall decline rate (currently 54.2%) shifting
+    sharply; the client roster growing enough to justify a bigger, more stable honest split; or a
+    full quarter passing without a refresh.</p>
+
+    <figure>
+      <img src="assets/w07_precision_at_50_range.svg" alt="Bar chart of precision at 50 across five different random seeds for the client-grouped split, ranging from 0.52 to 0.72." loading="lazy">
+      <figcaption>The range this playbook reports &mdash; five honest splits of the same data,
+      same model.</figcaption>
+    </figure>
+  </section>
+
+  <section id="reproducibility">
+    <div class="section-head"><span class="section-num">07</span><h2>Reproducibility</h2></div>
+    <p>Every number in this paper traces back to an executed notebook in the linked repository.
+    Random seeds are fixed (<code>random_state=42</code> for headline numbers; seeds 1, 7, 13, 99
+    for the split-variance check) and printed inline in each notebook's own output.</p>
+    <ul class="repro-list">
+      <li><span>Repository</span> <code><a href="https://github.com/abc085455-byte/flyrank-ml-internship">flyrank-ml-internship</a></code></li>
+      <li><span>Question &amp; framing</span> <code><a href="https://github.com/abc085455-byte/flyrank-ml-internship/blob/main/work/notebooks/w01_research_question.ipynb">w01_research_question.ipynb</a></code></li>
+      <li><span>Baseline rule</span> <code><a href="https://github.com/abc085455-byte/flyrank-ml-internship/blob/main/work/notebooks/w04_baseline_score.ipynb">w04_baseline_score.ipynb</a></code></li>
+      <li><span>Model &amp; error analysis</span> <code><a href="https://github.com/abc085455-byte/flyrank-ml-internship/blob/main/work/notebooks/w05_model.ipynb">w05_model.ipynb</a></code></li>
+      <li><span>Validation audit</span> <code><a href="https://github.com/abc085455-byte/flyrank-ml-internship/blob/main/work/notebooks/w06_validation_audit.ipynb">w06_validation_audit.ipynb</a></code></li>
+      <li><span>Action playbook</span> <code><a href="https://github.com/abc085455-byte/flyrank-ml-internship/blob/main/work/notebooks/w07_action_playbook.ipynb">w07_action_playbook.ipynb</a></code></li>
+      <li><span>This paper's notebook</span> <code><a href="https://github.com/abc085455-byte/flyrank-ml-internship/blob/main/work/notebooks/capstone.ipynb">capstone.ipynb</a></code></li>
+      <li><span>Demo outline &amp; shareable cuts</span> <code><a href="https://github.com/abc085455-byte/flyrank-ml-internship/blob/main/work/notebooks/capstone.ipynb">capstone.ipynb</a> (closing cells)</code></li>
+      <li><span>Metrics receipts</span> <code><a href="https://github.com/abc085455-byte/flyrank-ml-internship/blob/main/work/outputs/capstone_metrics.json">capstone_metrics.json</a></code></li>
+    </ul>
+    <p>The ranked queue CSV itself is intentionally not committed to the repository &mdash; it
+    regenerates from <code>w07_action_playbook.ipynb</code> on every run, and the repository's own
+    CI blocks committed data files by design, so the notebooks are the source of truth rather than
+    a static export.</p>
+  </section>
+
+  <footer>
+    <div class="section-head"><span class="section-num">08</span><h2>Acknowledgments &amp; data credit</h2></div>
+    <p class="credit">Built on the <a href="https://flyrank.ai">FlyRank ML Internship dataset</a>.
+    Thank you to the FlyRank team for anonymizing and releasing real production search data for
+    this internship &mdash; without it, none of the analysis above would exist.</p>
+  </footer>
+
+</div>
+
+</body>
+</html>
